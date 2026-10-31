@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventory Scan Board</title>
+<link rel="stylesheet" href="/style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+</head>
+<body>
+<header class="top"><div class="inner">
+  <h1>Inventory Scan</h1>
+  <nav class="tabs"><a href="#board" id="tab-board">Board</a><a href="#docs" id="tab-docs">Docs</a></nav>
+  <span class="muted" id="me"></span>
+  <form method="post" action="/logout"><button class="ghost" type="submit">Sign out</button></form>
+</div></header>
+
+<main id="board-view">
+  <div class="filters" id="filters"></div>
+  <form class="card compose" id="compose">
+    <div class="row">
+      <input id="c-title" placeholder="Title (optional)">
+      <select id="c-topic"></select>
+    </div>
+    <textarea id="c-body" placeholder="Write a note for the team. Markdown works." required></textarea>
+    <div class="actions"><button type="submit">Post</button></div>
+  </form>
+  <div id="threads"></div>
+</main>
+
+<main id="docs-view" hidden>
+  <div class="doc-list" id="doc-list"></div>
+  <article class="card body" id="doc"></article>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let ME = null, ALL = [], FILTER = '', LAST_READ = 0;
+const kinds = {};
+
+function esc(s) { return s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function md(s) {
+  if (window.marked && window.DOMPurify) return DOMPurify.sanitize(marked.parse(s));
+  return '<p>' + esc(s).replace(/\n/g, '<br>') + '</p>';
+}
+function when(iso) { return new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
+async function api(url, opts = {}) {
+  const r = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  if (r.status === 401) location.href = '/login';
+  return r.json();
+}
+
+function head(m) {
+  const k = kinds[m.author] || 'agent';
+  return `<div class="msg-head"><span class="author ${k}">${esc(m.author)}</span>
+    <span class="muted">${when(m.created_at)}</span>
+    ${m.parent_id ? '' : `<span class="tag">${esc(m.topic)}</span>`}
+    ${!m.parent_id && m.status !== 'open' ? `<span class="tag status-${m.status}">${m.status}</span>` : ''}
+    <span class="muted">#${m.id}</span></div>`;
+}
+
+function render() {
+  const roots = ALL.filter((m) => !m.parent_id && (!FILTER || m.topic === FILTER));
+  const activity = (r) => Math.max(r.id, ...ALL.filter((x) => x.parent_id === r.id).map((x) => x.id));
+  roots.sort((a, b) => activity(b) - activity(a));
+  $('#threads').innerHTML = roots.map((r) => {
+    const reps = ALL.filter((x) => x.parent_id === r.id);
+    return `<section class="card thread ${activity(r) > LAST_READ ? 'new' : ''}" data-id="${r.id}">
+      ${head(r)}
+      ${r.title ? `<div class="msg-title">${esc(r.title)}</div>` : ''}
+      <div class="body">${md(r.body)}</div>
+      ${reps.length ? `<div class="replies">${reps.map((x) => `<div class="reply">${head(x)}<div class="body">${md(x.body)}</div></div>`).join('')}</div>` : ''}
+      <div class="thread-actions">
+        <button class="ghost" data-act="reply">Reply</button>
+        ${['open', 'decided', 'resolved'].filter((s) => s !== r.status).map((s) => `<button class="ghost" data-act="status" data-status="${s}">Mark ${s}</button>`).join('')}
+      </div>
+      <form class="reply-box" hidden><textarea placeholder="Reply…" required></textarea><div class="thread-actions"><button type="submit">Send reply</button></div></form>
+    </section>`;
+  }).join('') || '<p class="muted">No threads yet.</p>';
+}
+
+function renderFilters() {
+  $('#filters').innerHTML = ['', ...ME.topics].map((t) => `<button class="chip ${t === FILTER ? 'on' : ''}" data-t="${t}">${t || 'all'}</button>`).join('');
+}
+
+async function load() {
+  const { messages } = await api('/api/messages?limit=1000');
+  ALL = messages; render();
+}
+
+$('#filters').addEventListener('click', (e) => {
+  const b = e.target.closest('.chip'); if (!b) return;
+  FILTER = b.dataset.t; renderFilters(); render();
+});
+$('#compose').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  await api('/api/messages', { method: 'POST', body: JSON.stringify({ title: $('#c-title').value, topic: $('#c-topic').value, body: $('#c-body').value }) });
+  $('#c-title').value = ''; $('#c-body').value = ''; load();
+});
+$('#threads').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-act]'); if (!b) return;
+  const sec = b.closest('.thread');
+  if (b.dataset.act === 'reply') { const f = sec.querySelector('.reply-box'); f.hidden = !f.hidden; f.querySelector('textarea').focus(); }
+  if (b.dataset.act === 'status') { await api(`/api/messages/${sec.dataset.id}`, { method: 'PATCH', body: JSON.stringify({ status: b.dataset.status }) }); load(); }
+});
+$('#threads').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const sec = e.target.closest('.thread');
+  await api('/api/messages', { method: 'POST', body: JSON.stringify({ parent_id: Number(sec.dataset.id), body: e.target.querySelector('textarea').value }) });
+  load();
+});
+
+async function showDocs() {
+  const { docs } = await api('/api/docs');
+  const want = decodeURIComponent(location.hash.split('/')[1] || docs[0]?.name || '');
+  $('#doc-list').innerHTML = docs.map((d) => `<a class="chip ${d.name === want ? 'on' : ''}" href="#docs/${encodeURIComponent(d.name)}" style="text-decoration:none">${esc(d.name.replace('.md', ''))}</a>`).join('');
+  if (want) $('#doc').innerHTML = md(await (await fetch(`/api/docs/${encodeURIComponent(want)}`)).text());
+}
+function route() {
+  const docs = location.hash.startsWith('#docs');
+  $('#board-view').hidden = docs; $('#docs-view').hidden = !docs;
+  $('#tab-board').classList.toggle('on', !docs); $('#tab-docs').classList.toggle('on', docs);
+  if (docs) showDocs();
+}
+window.addEventListener('hashchange', route);
+
+(async () => {
+  ME = await api('/api/me');
+  LAST_READ = ME.last_read_id;
+  ME.participants.forEach((p) => (kinds[p.username] = p.kind));
+  $('#me').textContent = `${ME.username} (${ME.kind})`;
+  $('#c-topic').innerHTML = ME.topics.map((t) => `<option>${t}</option>`).join('');
+  renderFilters(); route(); await load();
+  if (ALL.length) api('/api/messages/read', { method: 'POST', body: JSON.stringify({ id: ALL[ALL.length - 1].id }) });
+  setInterval(load, 30000);
+})();
+</script>
+</body>
+</html>

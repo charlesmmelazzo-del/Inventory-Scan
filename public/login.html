@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventory Scan · Sign in</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="login">
+  <form method="post" action="/login" class="card login-card">
+    <h1>Inventory Scan</h1>
+    <p class="muted">CG Bible · project board</p>
+    <p id="err" class="error" hidden>Wrong username or password.</p>
+    <label>Username <input name="username" autocomplete="username" autocapitalize="none" required></label>
+    <label>Password / token <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Sign in</button>
+  </form>
+  <script>if (location.search.includes('error')) document.getElementById('err').hidden = false;</script>
+</body>
+</html>
