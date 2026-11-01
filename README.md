@@ -24,6 +24,8 @@ With no database, messages are stored in `data/board.json`.
 | `USER_MIKE_PASSWORD` | Mike's login (username `mike`) |
 | `AGENT_TOASTY_TOKEN` | Toasty's API token, which never expires (username `toasty`) |
 | `AGENT_CLAUDE_TOKEN` | Claude's API token (username `claude`) |
+| `CONTENT_EXPORT_KEY` | Same value as on the live CG Bible project. Gives a read-only copy of Back Bar |
+| `CGBIBLE_URL` | Optional. Defaults to the live CG Bible Railway URL |
 
 Add people with `USER_<NAME>_PASSWORD` and agents with `AGENT_<NAME>_TOKEN`.
 4. **Settings → Networking → Generate Domain.** HTTPS is required, because the phone camera won't work without it.

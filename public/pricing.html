@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pour Price Calculator</title>
+<link rel="stylesheet" href="/style.css">
+<style>
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  @media (max-width: 520px) { .grid3 { grid-template-columns: 1fr 1fr; } }
+  h2 { font-size: 16px; margin: 0 0 6px; }
+  section.card { margin-bottom: 16px; }
+  .stats { display: flex; gap: 18px; flex-wrap: wrap; margin: 8px 0; font-size: 14px; }
+  .stats b { display: block; font-size: 18px; }
+  .pours { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
+  .pour { border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+  .pour .lbl { font-size: 12px; color: var(--muted); }
+  .pour input { font-size: 18px; font-weight: 700; padding: 6px 8px; margin: 4px 0; }
+  .pour .mk { font-size: 13px; }
+  .mk.low { color: var(--error); font-weight: 600; }
+  .item { border-top: 1px solid var(--line); padding: 12px 0; }
+  .item:first-of-type { border-top: 0; }
+  .item-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; align-items: baseline; }
+  .item-name { font-weight: 700; }
+  .now { font-size: 12px; color: var(--muted); }
+  .item .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px; align-items: center; }
+  .ok { color: var(--human); font-weight: 600; font-size: 13px; }
+  .notice { background: var(--chip); border-radius: 8px; padding: 10px 12px; font-size: 14px; }
+</style>
+</head>
+<body>
+<header class="top"><div class="inner">
+  <h1>Inventory Scan</h1>
+  <nav class="tabs"><a href="/#board">Board</a><a href="/#docs">Docs</a><a href="/pricing.html" class="on">Pricing</a></nav>
+</div></header>
+<main>
+  <section class="card">
+    <h2>Pour price settings</h2>
+    <p class="muted" style="margin:0">Each price = cost per oz × pour size × multiplier, rounded up.</p>
+    <form id="settings" class="grid3">
+      <label>Multiplier (×)<input name="multiplier" type="number" step="0.01" min="0.1" inputmode="decimal"></label>
+      <label>Round up to
+        <select name="rounding"><option value="1">$1.00</option><option value="0.5">$0.50</option><option value="0.25">$0.25</option><option value="0.1">$0.10</option><option value="0">No rounding</option></select>
+      </label>
+      <label>Min 1 oz price ($)<input name="min_1oz" type="number" step="0.25" min="0" inputmode="decimal"></label>
+    </form>
+    <div style="display:flex;justify-content:flex-end;gap:8px;align-items:center"><span id="saved" class="ok" hidden>Saved</span><button form="settings" type="submit">Save settings</button></div>
+  </section>
+
+  <section class="card">
+    <h2>Quick calculator</h2>
+    <div class="grid2">
+      <label>Bottle cost ($)<input id="q-cost" type="number" step="0.01" inputmode="decimal" placeholder="32.00"></label>
+      <label>Bottle size (ml)<select id="q-ml"><option>750</option><option>1000</option><option>1750</option><option>700</option><option>500</option><option>375</option><option>200</option></select></label>
+    </div>
+    <div id="q-out"></div>
+  </section>
+
+  <section class="card">
+    <h2>Review before Toast</h2>
+    <p class="muted" style="margin-top:0">Prices proposed from your current Back Bar costs. Edit any price and the markup updates. Nothing goes to Toast until it's approved here. <b>Prototype:</b> for now, an approval is only recorded on this site.</p>
+    <div id="sync" class="notice" hidden></div>
+    <input id="search" placeholder="Search bottles…" style="margin:8px 0">
+    <div id="list"></div>
+  </section>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const money = (n) => n == null ? '—' : '$' + Number(n).toFixed(2);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const POURS = [['1oz', '1 oz', 1], ['highball', 'Highball 1.5 oz', 1.5], ['2oz', '2 oz', 2]];
+let SETTINGS = {}, ROWS = [];
+async function api(url, opts = {}) {
+  const r = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  if (r.status === 401) location.href = '/login';
+  return r.json();
+}
+function markupClass(m) { return m != null && m < SETTINGS.multiplier - 0.05 ? 'mk low' : 'mk'; }
+
+function poursHtml(q, editable, id) {
+  return `<div class="pours">${q.pours.map((p) => `<div class="pour">
+    <div class="lbl">${p.label} · cost ${money(p.cost)}</div>
+    ${editable ? `<input type="number" step="0.25" inputmode="decimal" value="${p.price.toFixed(2)}" data-k="${p.key}" data-oz="${p.oz}" data-id="${id}">` : `<div style="font-size:18px;font-weight:700">${money(p.price)}</div>`}
+    <div class="${markupClass(p.markup)}" data-mk="${p.key}">${p.markup}× markup</div></div>`).join('')}</div>`;
+}
+
+async function loadSettings() {
+  SETTINGS = (await api('/api/pricing/settings')).settings;
+  const f = $('#settings');
+  f.multiplier.value = SETTINGS.multiplier; f.rounding.value = String(SETTINGS.rounding); f.min_1oz.value = SETTINGS.min_1oz;
+}
+$('#settings').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  SETTINGS = (await api('/api/pricing/settings', { method: 'PUT', body: JSON.stringify({ multiplier: f.multiplier.value, rounding: f.rounding.value, min_1oz: f.min_1oz.value }) })).settings;
+  $('#saved').hidden = false; setTimeout(() => ($('#saved').hidden = true), 1500);
+  quick(); loadReview();
+});
+
+async function quick() {
+  const cost = parseFloat($('#q-cost').value);
+  if (!(cost > 0)) { $('#q-out').innerHTML = ''; return; }
+  const r = await api('/api/pricing/quote', { method: 'POST', body: JSON.stringify({ bottle_cost: cost, volume_ml: Number($('#q-ml').value) }) });
+  if (!r.quote) return;
+  const q = r.quote;
+  $('#q-out').innerHTML = `<div class="stats"><span>Cost / bottle<b>${money(q.cost_bottle)}</b></span><span>Cost / oz<b>${money(q.cost_per_oz)}</b></span><span>Oz / bottle<b>${q.oz_per_bottle}</b></span><span>Multiplier<b>${q.multiplier}×</b></span></div>${poursHtml(q, false)}`;
+}
+$('#q-cost').addEventListener('input', quick);
+$('#q-ml').addEventListener('change', quick);
+
+function renderList() {
+  const term = $('#search').value.trim().toLowerCase();
+  const rows = ROWS.filter((r) => r.proposal && (!term || `${r.name} ${r.producer} ${r.category}`.toLowerCase().includes(term)));
+  const noCost = ROWS.filter((r) => !r.proposal).length;
+  $('#list').innerHTML = rows.slice(0, 60).map((r) => {
+    const q = r.proposal, c = r.current;
+    return `<div class="item" data-id="${r.product_id}">
+      <div class="item-head"><span class="item-name">${esc(r.name)}</span><span class="tag">${esc(r.category || '—')}</span></div>
+      <div class="stats"><span>Size<b>${r.basis.volume_ml} ml</b></span><span>Cost / bottle<b>${money(q.cost_bottle)}</b></span><span>Cost / oz<b>${money(q.cost_per_oz)}</b></span></div>
+      ${c ? `<div class="now">CG Bible now: 1 oz ${money(c.price_1oz)} · highball ${money(c.price_highball)} · 2 oz ${money(c.price_2oz)}</div>` : ''}
+      ${r.allocated_rare ? '<div class="now">Allocated/rare: always priced by hand</div>' : ''}
+      ${poursHtml(q, true, r.product_id)}
+      <div class="actions"><span class="ok" hidden>Approved</span><button data-approve="${r.product_id}">Approve prices</button></div>
+    </div>`;
+  }).join('') + (rows.length > 60 ? `<p class="muted">Showing 60 of ${rows.length}. Search to narrow the list.</p>` : '') +
+    (noCost ? `<p class="muted">${noCost} Back Bar products have no cost yet, so they can't be priced. Those will need a Fintech or Provi lookup.</p>` : '');
+}
+$('#search').addEventListener('input', renderList);
+$('#list').addEventListener('input', (e) => {
+  const i = e.target.closest('input[data-k]'); if (!i) return;
+  const r = ROWS.find((x) => x.product_id == i.dataset.id);
+  const m = Math.round((Number(i.value) / (r.proposal.cost_per_oz * Number(i.dataset.oz))) * 100) / 100;
+  const el = i.parentElement.querySelector('[data-mk]');
+  el.textContent = `${m}× markup`; el.className = markupClass(m);
+});
+$('#list').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-approve]'); if (!b) return;
+  const item = b.closest('.item');
+  const r = ROWS.find((x) => x.product_id == b.dataset.approve);
+  const prices = Object.fromEntries([...item.querySelectorAll('input[data-k]')].map((i) => [i.dataset.k, Number(i.value)]));
+  const res = await api('/api/pricing/approve', { method: 'POST', body: JSON.stringify({ product_id: r.product_id, name: r.name, volume_ml: r.basis.volume_ml, cost_bottle: r.basis.cost, prices }) });
+  if (res.approval) { item.querySelector('.ok').hidden = false; b.textContent = 'Approve again'; }
+  else alert(res.error || 'Could not approve');
+});
+
+async function loadReview() {
+  const d = await api('/api/pricing/review');
+  ROWS = d.products;
+  const s = d.status;
+  const box = $('#sync');
+  if (!s.loaded) {
+    box.hidden = false;
+    box.innerHTML = s.configured
+      ? `Back Bar data isn't loaded yet${s.error ? `: ${esc(s.error)}` : ''}. <button class="ghost" id="resync">Try sync now</button>`
+      : `Back Bar data isn't connected. Set <code>CONTENT_EXPORT_KEY</code> on Railway (the same value as the live CG Bible) to load your real bottles. The quick calculator above works without it.`;
+  } else {
+    box.hidden = false;
+    box.innerHTML = `${s.products} Back Bar products synced from the live CG Bible (read-only), last synced ${new Date(s.last_sync || Date.now()).toLocaleString()}. <button class="ghost" id="resync">Sync now</button>`;
+  }
+  renderList();
+}
+document.addEventListener('click', async (e) => {
+  if (e.target.id !== 'resync') return;
+  e.target.textContent = 'Syncing…'; await api('/api/backbar/sync', { method: 'POST' }); loadReview();
+});
+
+(async () => { await loadSettings(); loadReview(); })();
+</script>
+</body>
+</html>

@@ -24,6 +24,8 @@ class FileStore {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     this.data = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : { seq: 0, messages: [], reads: {} };
     this.data.reads = this.data.reads || {};
+    this.data.settings = this.data.settings || {};
+    this.data.price_reviews = this.data.price_reviews || [];
   }
   async init() {}
   save() { fs.writeFileSync(this.file, JSON.stringify(this.data, null, 2)); }
@@ -53,6 +55,13 @@ class FileStore {
   async count() { return this.data.messages.length; }
   async getRead(user) { return this.data.reads[user] || 0; }
   async setRead(user, id) { this.data.reads[user] = Math.max(this.data.reads[user] || 0, id); this.save(); }
+  async getSetting(key) { return this.data.settings[key] ?? null; }
+  async setSetting(key, value) { this.data.settings[key] = value; this.save(); }
+  async addPriceReview(r) {
+    const row = { id: this.data.price_reviews.length + 1, ...r, created_at: new Date().toISOString() };
+    this.data.price_reviews.push(row); this.save(); return row;
+  }
+  async listPriceReviews() { return [...this.data.price_reviews].reverse(); }
 }
 
 class PgStore {
@@ -76,6 +85,15 @@ class PgStore {
       CREATE TABLE IF NOT EXISTS board_reads (
         username TEXT PRIMARY KEY,
         last_read_id INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value JSONB NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS price_reviews (
+        id SERIAL PRIMARY KEY,
+        data JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
       );`);
   }
   async create({ author, topic, parent_id, title, body }) {
@@ -116,6 +134,24 @@ class PgStore {
        ON CONFLICT (username) DO UPDATE SET last_read_id = GREATEST(board_reads.last_read_id, EXCLUDED.last_read_id)`,
       [user, id]
     );
+  }
+  async getSetting(key) {
+    const r = await this.pool.query('SELECT value FROM app_settings WHERE key = $1', [key]);
+    return r.rows[0] ? r.rows[0].value : null;
+  }
+  async setSetting(key, value) {
+    await this.pool.query(
+      'INSERT INTO app_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value',
+      [key, JSON.stringify(value)]
+    );
+  }
+  async addPriceReview(r) {
+    const q = await this.pool.query('INSERT INTO price_reviews (data) VALUES ($1) RETURNING id, created_at', [JSON.stringify(r)]);
+    return { id: q.rows[0].id, ...r, created_at: q.rows[0].created_at.toISOString() };
+  }
+  async listPriceReviews() {
+    const q = await this.pool.query('SELECT id, data, created_at FROM price_reviews ORDER BY id DESC LIMIT 500');
+    return q.rows.map((x) => ({ id: x.id, ...x.data, created_at: x.created_at.toISOString() }));
   }
 }
 

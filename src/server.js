@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const { createStore, TOPICS } = require('./store');
 const { checkLogin, requireAuth, sessionCookie, accounts } = require('./auth');
+const cgbible = require('./cgbible');
+const pricing = require('./pricing');
 
 const ROOT = path.join(__dirname, '..');
 const DOCS_DIR = path.join(ROOT, 'docs');
@@ -104,6 +106,75 @@ function buildApp(store) {
     res.json({ message: m });
   });
 
+  // Whole board as one Markdown page — easiest for browser-based agents (ChatGPT agent mode) to read.
+  app.get('/api/board.md', async (_req, res) => {
+    const all = await store.list({ limit: 1000 });
+    const roots = all.filter((m) => !m.parent_id).reverse();
+    const out = ['# Inventory Scan board', ''];
+    for (const r of roots) {
+      out.push(`## #${r.id} [${r.topic}] [${r.status}] ${r.title || ''}`.trim(), `*${r.author} · ${r.created_at}*`, '', r.body, '');
+      for (const x of all.filter((m) => m.parent_id === r.id)) out.push(`> **${x.author}** · ${x.created_at} · #${x.id}`, '>', ...x.body.split('\n').map((l) => `> ${l}`), '');
+      out.push('---', '');
+    }
+    res.type('text/markdown').send(out.join('\n'));
+  });
+
+  // ---- API: CG Bible Back Bar mirror (read-only) ----
+  app.get('/api/backbar/status', (_req, res) => res.json(cgbible.status()));
+  app.post('/api/backbar/sync', async (_req, res) => res.json(await cgbible.sync('on demand')));
+  app.get('/api/backbar', (_req, res) => res.json({ status: cgbible.status(), products: cgbible.catalog() }));
+
+  // ---- API: Pour Price Calculator ----
+  const getPricing = async () => pricing.cleanSettings((await store.getSetting('pricing')) || {});
+  app.get('/api/pricing/settings', async (_req, res) => res.json({ settings: await getPricing(), defaults: pricing.DEFAULT_SETTINGS }));
+  app.put('/api/pricing/settings', async (req, res) => {
+    const settings = pricing.cleanSettings({ ...(await getPricing()), ...(req.body || {}) });
+    await store.setSetting('pricing', settings);
+    res.json({ settings });
+  });
+  // POST { bottle_cost, volume_ml, multiplier? } → cost/oz and 1 / 1.5 / 2 oz prices
+  app.post('/api/pricing/quote', async (req, res) => {
+    const b = req.body || {};
+    const q = pricing.pricePours(b, { ...(await getPricing()), ...(b.multiplier ? { multiplier: b.multiplier } : {}) });
+    if (!q) return res.status(400).json({ error: 'bottle_cost and volume_ml must be positive numbers' });
+    res.json({ quote: q });
+  });
+  // Every Back Bar product with a cost, proposed prices next to what CG Bible has today.
+  app.get('/api/pricing/review', async (_req, res) => {
+    const s = await getPricing();
+    const rows = cgbible.catalog().map((p) => {
+      const costed = p.sizes.filter((v) => v.wholesale_cost > 0);
+      const inStock = costed.filter((v) => v.on_hand_count > 0);
+      const pool = inStock.length ? inStock : costed; // same basis rule CG Bible uses
+      const basis = pool.reduce((best, v) => (!best || v.wholesale_cost > best.wholesale_cost ? v : best), null);
+      return {
+        product_id: p.id, name: p.name, producer: p.producer, category: p.category, status: p.status,
+        allocated_rare: p.allocated_rare, current: p.pricing,
+        basis: basis ? { variant_id: basis.id, volume_ml: basis.volume_ml, cost: basis.wholesale_cost } : null,
+        proposal: basis ? pricing.pricePours({ bottle_cost: basis.wholesale_cost, volume_ml: basis.volume_ml }, s) : null,
+      };
+    });
+    res.json({ settings: s, status: cgbible.status(), products: rows });
+  });
+  // Human approval of final prices. Prototype: recorded here; later this feeds CG Bible's bb_pos_queue / Toast.
+  app.post('/api/pricing/approve', async (req, res) => {
+    const b = req.body || {};
+    const prices = b.prices || {};
+    const costPerOz = Number(b.cost_bottle) / (Number(b.volume_ml) / pricing.ML_PER_OZ);
+    if (!b.name || !(costPerOz > 0) || !pricing.POURS.every((p) => Number(prices[p.key]) > 0)) {
+      return res.status(400).json({ error: 'name, cost_bottle, volume_ml and prices for 1oz, highball, 2oz are required' });
+    }
+    const row = await store.addPriceReview({
+      product_id: b.product_id ?? null, name: b.name, volume_ml: Number(b.volume_ml), cost_bottle: Number(b.cost_bottle),
+      cost_per_oz: Math.round(costPerOz * 100) / 100,
+      prices: Object.fromEntries(pricing.POURS.map((p) => [p.key, Number(prices[p.key])])),
+      markups: Object.fromEntries(pricing.POURS.map((p) => [p.key, pricing.markupFor(Number(prices[p.key]), costPerOz, p.oz)])),
+      approved_by: req.user.username, destination: 'pending: Toast publish (not wired yet)',
+    });
+    res.status(201).json({ approval: row });
+  });
+  app.get('/api/pricing/approved', async (_req, res) => res.json({ approvals: await store.listPriceReviews() }));
+
   // ---- API: project docs (the shared brief both agents work from) ----
   app.get('/api/docs', (_req, res) => {
     const files = fs.readdirSync(DOCS_DIR).filter((f) => f.endsWith('.md')).sort();
@@ -130,6 +201,7 @@ async function main() {
   const store = createStore();
   await store.init();
   await seedIfEmpty(store);
+  cgbible.start();
   const app = buildApp(store);
   const port = process.env.PORT || 3000;
   app.listen(port, () => {
